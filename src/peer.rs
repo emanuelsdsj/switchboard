@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Instant,
+};
 
 use bytes::Bytes;
 use str0m::{
@@ -66,9 +70,28 @@ impl PeerSession {
 
         let mut rtc = Rtc::builder().set_rtp_mode(true).build();
 
-        // Register our local UDP address so str0m includes it in the SDP answer.
-        let host: SocketAddr = format!("127.0.0.1:{local_port}").parse().unwrap();
-        rtc.add_local_candidate(Candidate::host(host, "udp")?);
+        // Probe the routing table to find the real outbound IP.
+        // In WSL2 this gives the WSL ethernet IP (e.g. 172.18.x.x) which Windows
+        // browsers can actually reach over UDP — unlike 127.0.0.1 which is
+        // WSL-internal only and makes ICE fail immediately.
+        let outbound_ip: IpAddr = (|| -> std::io::Result<IpAddr> {
+            let probe = std::net::UdpSocket::bind("0.0.0.0:0")?;
+            probe.connect("8.8.8.8:80")?;
+            Ok(probe.local_addr()?.ip())
+        })()
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+
+        rtc.add_local_candidate(Candidate::host(
+            SocketAddr::new(outbound_ip, local_port),
+            "udp",
+        )?);
+        // Keep loopback as a fallback for same-machine tests.
+        if outbound_ip != IpAddr::V4(Ipv4Addr::LOCALHOST) {
+            rtc.add_local_candidate(Candidate::host(
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local_port),
+                "udp",
+            )?);
+        }
 
         let offer = SdpOffer::from_sdp_string(&offer_sdp)?;
         let answer = rtc.sdp_api().accept_offer(offer)?;
