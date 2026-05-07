@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>corten — local test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: monospace; background: #111; color: #e0e0e0; padding: 24px; }
+    h1 { font-size: 1.2rem; color: #c07850; margin-bottom: 16px; }
+    #controls { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+    input  { background: #222; border: 1px solid #444; color: #e0e0e0; padding: 6px 10px; border-radius: 4px; }
+    button { background: #333; border: 1px solid #555; color: #e0e0e0; padding: 6px 14px;
+             border-radius: 4px; cursor: pointer; }
+    button:hover { background: #444; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    #log  { background: #1a1a1a; border: 1px solid #333; padding: 12px; height: 180px;
+            overflow-y: auto; font-size: 0.8rem; margin-bottom: 16px; border-radius: 4px; }
+    .log-in  { color: #60c060; }
+    .log-out { color: #6090d0; }
+    .log-err { color: #d06060; }
+    #videos { display: flex; gap: 12px; flex-wrap: wrap; }
+    video { width: 320px; height: 240px; background: #000; border: 1px solid #333; border-radius: 4px; }
+    label { font-size: 0.75rem; color: #888; display: block; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <h1>corten SFU — browser test</h1>
+
+  <div id="controls">
+    <input id="room"  type="text" placeholder="room id" value="dev" style="width:120px" />
+    <button id="btnJoin">join</button>
+    <button id="btnLeave" disabled>leave</button>
+  </div>
+
+  <div id="log"></div>
+
+  <div id="videos">
+    <div>
+      <label>local</label>
+      <video id="localVideo" autoplay muted playsinline></video>
+    </div>
+    <div id="remotes"></div>
+  </div>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const logEl = $('log');
+  const log = (msg, cls = '') => {
+    const d = document.createElement('div');
+    d.className = cls;
+    d.textContent = `${new Date().toISOString().slice(11,23)} ${msg}`;
+    logEl.appendChild(d);
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+
+  let ws, pc, localStream;
+  const WS_URL = `ws://${location.host}/ws`;
+
+  // ─── WebSocket helpers ───────────────────────────────────────────────────────
+
+  function send(obj) {
+    const json = JSON.stringify(obj);
+    log(`→ ${json}`, 'log-out');
+    ws.send(json);
+  }
+
+  function onMessage(raw) {
+    const msg = JSON.parse(raw);
+    log(`← ${raw}`, 'log-in');
+
+    switch (msg.type) {
+      case 'welcome':
+        $('btnLeave').disabled = false;
+        $('btnJoin').disabled  = true;
+        startWebRTC();
+        break;
+
+      case 'answer':
+        pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+        break;
+
+      case 'iceCandidate':
+        pc.addIceCandidate({ candidate: msg.candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMlineIndex });
+        break;
+
+      case 'peerJoined':
+        log(`peer joined: ${msg.peerId}`);
+        break;
+
+      case 'peerLeft':
+        log(`peer left: ${msg.peerId}`);
+        removeRemoteVideo(msg.peerId);
+        break;
+
+      case 'error':
+        log(`error: ${msg.message}`, 'log-err');
+        break;
+    }
+  }
+
+  // ─── WebRTC ─────────────────────────────────────────────────────────────────
+
+  async function startWebRTC() {
+    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    $('localVideo').srcObject = localStream;
+
+    pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+
+    localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+    pc.onicecandidate = ({ candidate }) => {
+      if (candidate) {
+        send({
+          type: 'iceCandidate',
+          candidate: candidate.candidate,
+          sdpMid: candidate.sdpMid,
+          sdpMlineIndex: candidate.sdpMLineIndex,
+        });
+      }
+    };
+
+    pc.ontrack = ({ streams, track }) => {
+      const stream = streams[0];
+      let vid = document.querySelector(`video[data-stream="${stream.id}"]`);
+      if (!vid) {
+        vid = document.createElement('video');
+        vid.autoplay = true;
+        vid.playsInline = true;
+        vid.dataset.stream = stream.id;
+        vid.style.cssText = 'width:320px;height:240px;background:#000;border:1px solid #333;border-radius:4px';
+        $('remotes').appendChild(vid);
+      }
+      vid.srcObject = stream;
+    };
+
+    pc.onconnectionstatechange = () => log(`connection: ${pc.connectionState}`);
+    pc.oniceconnectionstatechange = () => log(`ice: ${pc.iceConnectionState}`);
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    send({ type: 'offer', sdp: offer.sdp });
+  }
+
+  function removeRemoteVideo(peerId) {
+    // simple cleanup — in production we'd map peer IDs to stream IDs
+    log(`removing video for ${peerId}`);
+  }
+
+  // ─── UI ─────────────────────────────────────────────────────────────────────
+
+  $('btnJoin').addEventListener('click', () => {
+    const roomId = $('room').value.trim() || 'dev';
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen    = () => { log('ws connected'); send({ type: 'join', roomId }); };
+    ws.onmessage = e => onMessage(e.data);
+    ws.onerror   = () => log('ws error', 'log-err');
+    ws.onclose   = () => { log('ws closed'); resetUI(); };
+  });
+
+  $('btnLeave').addEventListener('click', () => {
+    ws?.close();
+    pc?.close();
+    localStream?.getTracks().forEach(t => t.stop());
+    resetUI();
+  });
+
+  function resetUI() {
+    $('btnJoin').disabled  = false;
+    $('btnLeave').disabled = true;
+    $('localVideo').srcObject = null;
+    $('remotes').innerHTML = '';
+    pc = null; localStream = null;
+  }
+</script>
+</body>
+</html>
