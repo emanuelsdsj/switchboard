@@ -4,13 +4,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ClientMsg {
-    /// First message — claims a room slot.
+    #[serde(rename_all = "camelCase")]
     Join { room_id: String },
 
-    /// SDP offer produced by the browser's RTCPeerConnection.
     Offer { sdp: String },
 
-    /// Trickle ICE candidate from the browser.
+    #[serde(rename_all = "camelCase")]
     IceCandidate {
         candidate: String,
         sdp_mid: Option<String>,
@@ -22,24 +21,24 @@ pub enum ClientMsg {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum ServerMsg {
-    /// Sent immediately after a successful Join.
+    #[serde(rename_all = "camelCase")]
     Welcome {
         peer_id: String,
-        /// IDs of peers already in the room when this peer joined.
         peers: Vec<String>,
     },
 
-    /// SDP answer produced by str0m in response to the browser's offer.
     Answer { sdp: String },
 
-    /// Trickle ICE candidate gathered by the server side.
+    #[serde(rename_all = "camelCase")]
     IceCandidate {
         candidate: String,
         sdp_mid: Option<String>,
         sdp_mline_index: Option<u16>,
     },
 
+    #[serde(rename_all = "camelCase")]
     PeerJoined { peer_id: String },
+    #[serde(rename_all = "camelCase")]
     PeerLeft { peer_id: String },
 
     Error { message: String },
