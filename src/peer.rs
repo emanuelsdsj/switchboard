@@ -4,6 +4,18 @@ use std::{
     time::Instant,
 };
 
+fn local_ipv4_addrs() -> Vec<IpAddr> {
+    if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|i| !i.is_loopback())
+        .filter_map(|i| match i.addr {
+            if_addrs::IfAddr::V4(v4) => Some(IpAddr::V4(v4.ip)),
+            _ => None,
+        })
+        .collect()
+}
+
 use bytes::Bytes;
 use str0m::{
     change::SdpOffer,
@@ -70,27 +82,21 @@ impl PeerSession {
 
         let mut rtc = Rtc::builder().set_rtp_mode(true).build();
 
-        // Probe the routing table to find the real outbound IP.
-        // In WSL2 this gives the WSL ethernet IP (e.g. 172.18.x.x) which Windows
-        // browsers can actually reach over UDP — unlike 127.0.0.1 which is
-        // WSL-internal only and makes ICE fail immediately.
-        let outbound_ip: IpAddr = (|| -> std::io::Result<IpAddr> {
-            let probe = std::net::UdpSocket::bind("0.0.0.0:0")?;
-            probe.connect("8.8.8.8:80")?;
-            Ok(probe.local_addr()?.ip())
-        })()
-        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-
-        rtc.add_local_candidate(Candidate::host(
-            SocketAddr::new(outbound_ip, local_port),
+        // Add every non-loopback IPv4 address as a host candidate.
+        // In WSL2 with mirrored networking there are multiple UP interfaces
+        // (e.g. eth1 at 192.168.x.x and eth3 at 172.18.x.x) — we need to
+        // advertise all of them so ICE can pick whichever the browser can reach.
+        for ip in local_ipv4_addrs() {
+            if let Ok(c) = Candidate::host(SocketAddr::new(ip, local_port), "udp") {
+                rtc.add_local_candidate(c);
+            }
+        }
+        // Loopback for same-machine testing.
+        if let Ok(c) = Candidate::host(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local_port),
             "udp",
-        )?);
-        // Keep loopback as a fallback for same-machine tests.
-        if outbound_ip != IpAddr::V4(Ipv4Addr::LOCALHOST) {
-            rtc.add_local_candidate(Candidate::host(
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), local_port),
-                "udp",
-            )?);
+        ) {
+            rtc.add_local_candidate(c);
         }
 
         let offer = SdpOffer::from_sdp_string(&offer_sdp)?;
