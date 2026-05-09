@@ -82,11 +82,24 @@ impl PeerSession {
 
         let mut rtc = Rtc::builder().set_rtp_mode(true).build();
 
-        // Add every non-loopback IPv4 address as a host candidate.
-        // In WSL2 with mirrored networking there are multiple UP interfaces
-        // (e.g. eth1 at 192.168.x.x and eth3 at 172.18.x.x) — we need to
-        // advertise all of them so ICE can pick whichever the browser can reach.
-        for ip in local_ipv4_addrs() {
+        // Add every non-loopback IPv4 address as a host candidate so ICE
+        // can pick whichever address the browser can actually reach.
+        let mut ips = local_ipv4_addrs();
+        // 10.255.255.254 sits on the loopback interface in some network
+        // configurations but is reachable from other machines — include it
+        // if present so is_loopback() filtering doesn't drop it.
+        let extra = IpAddr::V4("10.255.255.254".parse().unwrap());
+        if !ips.contains(&extra) {
+            if if_addrs::get_if_addrs()
+                .unwrap_or_default()
+                .iter()
+                .any(|i| matches!(&i.addr, if_addrs::IfAddr::V4(v) if IpAddr::V4(v.ip) == extra))
+            {
+                ips.push(extra);
+            }
+        }
+        tracing::debug!(peer_id, port = local_port, ?ips, "ice candidates");
+        for ip in ips {
             if let Ok(c) = Candidate::host(SocketAddr::new(ip, local_port), "udp") {
                 rtc.add_local_candidate(c);
             }
@@ -130,6 +143,9 @@ impl PeerSession {
                 match self.rtc.poll_output() {
                     Err(e) => {
                         warn!(peer_id = %self.peer_id, "rtc error: {e}");
+                        self.signal_tx
+                            .send(ServerMsg::Error { message: e.to_string() })
+                            .ok();
                         return;
                     }
                     Ok(Output::Timeout(t)) => break t,
@@ -157,6 +173,7 @@ impl PeerSession {
                 result = self.socket.recv_from(&mut buf) => {
                     match result {
                         Ok((len, source)) => {
+                            debug!(peer_id = %self.peer_id, from = ?source, bytes = len, "udp recv");
                             let destination = self.socket.local_addr().unwrap();
                             if let Ok(contents) = DatagramRecv::try_from(&buf[..len]) {
                                 self.rtc.handle_input(Input::Receive(
@@ -214,11 +231,11 @@ impl PeerSession {
     fn handle_event(&mut self, event: Event) -> bool {
         match event {
             Event::Connected => {
-                info!(peer_id = %self.peer_id, "webrtc connected");
+                info!(peer_id = %self.peer_id, room_id = %self.room_id, "webrtc connected");
             }
 
             Event::IceConnectionStateChange(state) => {
-                info!(peer_id = %self.peer_id, ?state, "ice state");
+                info!(peer_id = %self.peer_id, room_id = %self.room_id, ?state, "ice state");
             }
 
             Event::MediaData(data) => {
